@@ -1,0 +1,7 @@
+# Workspace内の不要なディレクトリ・ファイルを管理から除外
+workspace/data/
+workspace/saves/
+
+workspace/src/__pycache__/
+workspace/src/private_test/
+workspace/src/sample_code/

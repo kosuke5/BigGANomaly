@@ -1,0 +1,67 @@
+{
+  // IntelliSense を使用して利用可能な属性を学べます。
+  // 既存の属性の説明をホバーして表示します。
+  // 詳細情報は次を確認してください: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: 現在のファイル",
+      "type": "python",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "args": [
+        // For makeBodySplitData.py
+        // "--load_root", "./data/sample/abnormal",
+        // "--save_root", "./data/sample-split-class8/abnormal",
+        // "--num_section", "8",
+
+        // For train.py
+        "--data_root", "data",
+        "--save_root", "saves",
+        "--dataset", "CT256SB-class4",
+        "--shuffle", 
+        "--data_resize",
+        "--num_workers", "8",
+        "--num_epochs", "500",
+        "--batch_size", "2",
+        "--num_D_steps", "1",
+        "--num_D_accumulations", "1",
+        "--num_G_accumulations", "1",
+        "--latent_dim", "3000",
+        "--shared_dim", "428",
+        "--G_lr", "1e-4",
+        "--D_lr", "4e-4",
+        "--D_B2", "0.999",
+        "--G_B2", "0.999",
+        "--G_attn", "64",
+        "--D_attn", "64",
+        "--Genc_nl", "inplace_relu",
+        "--Gdec_nl", "inplace_relu",
+        "--Denc_nl", "inplace_relu",
+        "--SN_eps", "1e-6",
+        "--BN_eps", "1e-5",
+        "--adam_eps", "1e-6",
+        "--G_ortho", "0.0",
+        "--G_shared",
+        "--G_init", "ortho",
+        "--D_init", "ortho",
+        "--hier",
+        "--G_eval_mode",
+        "--G_ch", "96",
+        "--D_ch", "96",
+        "--ema",
+        "--use_ema",
+        "--ema_start", "20000",
+        "--save_frequency", "10000",
+        "--test_frequency", "2000",
+        "--num_best_copies", "5",
+        "--num_save_copies", "2",
+        "--seed", "0",
+        "--use_multiepoch_sampler",
+        "--pbar", "mine",
+      ]
+    }
+  ]
+}
