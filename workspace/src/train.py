@@ -12,6 +12,8 @@ from tqdm import tqdm
 from visdom import Visdom
 # numpy
 import numpy as np
+# torchvision
+from torchvision.models.feature_extraction import create_feature_extractor
 # 汎用モジュール
 import utils
 # ネットワーク構築
@@ -30,11 +32,15 @@ def run(config):
   vis = Visdom()
   vis.close()
 
+  # 学習状態の初期化
+  # ------------------------------------
+  state_dict = {'itr': 0, 'epoch': 0, 'save_num': 0, 'save_best_num': 0,
+                'best_IS': 0, 'best_FID': 999999, 'config': config}
 
   # DataLoaderの取得
   # ------------------------------------
   batch_size = (config['batch_size'] * config['num_D_steps'] * config['num_D_accumulations'])
-  loader = utils.getDataLoader(**{**config, 'batch_size': batch_size})
+  loader = utils.getDataLoader(**{**config, 'batch_size': batch_size, 'start_itr': state_dict['itr']})
   sample_normal_loader = utils.getDataLoader(**{**config, 'batch_size': 1,
                                                 'sample': True, 'sample_type': 'normal', 'shuffle': False})
   sample_abnormal_loader = utils.getDataLoader(**{**config, 'batch_size': 1,
@@ -43,11 +49,14 @@ def run(config):
   # ネットワークの構築
   # ------------------------------------
   # Generatorの構築
-  Gen_encoder = models.Encoder(**{**config, 'out_latent': True, 'output_dim': config['latent_dim']}).to(config['device'])
-  Gen_decoder = models.Decoder(**config).to(config['device'])
+  Gen_encoder = models.Encoder(**{**config, 
+                                  'out_latent': True, 'output_dim': config['latent_dim'], 
+                                  'Enc_ccbn_norm': config['G_ccbn_norm']}).to(config['device'])
+  Gen_decoder = models.Decoder(**{**config, 
+                                  'Dec_ccbn_norm': config['G_ccbn_norm']}).to(config['device'])
   Generator = models.Generator(Gen_encoder, Gen_decoder)
   # Discriminatorの構築
-  Dis_encoder = models.Encoder(**config).to(config['device'])
+  Dis_encoder = models.Encoder(**{**config, 'Enc_ccbn_norm': config['D_ccbn_norm']}).to(config['device'])
   Discriminator = models.Discriminator(Dis_encoder)
   # BigGANomalyの構築
   net = models.BigGANomaly(Generator, Discriminator)
@@ -58,9 +67,11 @@ def run(config):
   if config['ema']:
     # Generator
     Gen_encoder_ema = models.Encoder(**{**config, 
-                                        'out_latent': True, 'output_dim': config['latent_dim'], 
+                                        'out_latent': True, 'output_dim': config['latent_dim'],
+                                        'Enc_ccbn_norm': config['G_ccbn_norm'],
                                         'skip_init': True, 'no_optim': True}).to(config['device'])
-    Gen_decoder_ema = models.Decoder(**{**config, 
+    Gen_decoder_ema = models.Decoder(**{**config,
+                                        'Dec_ccbn_norm': config['G_ccbn_norm'], 
                                         'skip_init': True, 'no_optim': True}).to(config['device'])
     Generator_ema = models.Generator(Gen_encoder_ema, Gen_decoder_ema)
     # EMAインスタンスの作成
@@ -70,16 +81,21 @@ def run(config):
     Gen_encoder_ema, ema_instance_Gen_encoder = None, None
     Gen_decoder_ema, ema_instance_Gen_decoder = None, None
 
-  # 学習状態の初期化
-  # ------------------------------------
-  state_dict = {'itr': 0, 'epoch': 0, 'save_num': 0, 'save_best_num': 0,
-                'best_IS': 0, 'best_FID': 999999, 'config': config}
+  # ネットワークの詳細を保存（Layerの名前・ネットワーク構成）
+  # utils.save_gen_detail(config, Generator)
+
+  # 中間層の特徴量抽出器の作成
+  # feature_extractor = create_feature_extractor(net, {"conv1": "feature"})
   
   # 学習関数の定義
   # ------------------------------------
   train_fn = train_fns.training_function(Generator, Discriminator, net, 
                                          ema_instance_Gen_encoder, ema_instance_Gen_decoder, 
                                          state_dict, config)
+  
+  # 損失関数の記録
+  # ------------------------------------
+  loss_log = {'G_log_con': [], 'G_log_adv': [], 'D_log_real': [], 'D_log_fake': []}
 
   # 学習ループ
   # ------------------------------------
@@ -109,35 +125,43 @@ def run(config):
       x, y = x.to(config['device']), y.to(config['device'])
 
       # 学習の実行
-      metrics = train_fn(x, y)
+      lossTrain = train_fn(x, y)
+
+      # 損失関数のログを記録
+      loss_log['G_log_con'].append(lossTrain['G_loss_con'])
+      loss_log['G_log_adv'].append(lossTrain['G_loss_adv'])
+      loss_log['D_log_real'].append(lossTrain['D_loss_real'])
+      loss_log['D_log_fake'].append(lossTrain['D_loss_fake'])
 
       # 詳細表示
       if config['pbar'] == 'mine':
         print(', '.join(['itr: %d' % state_dict['itr']] 
-                        + ['%s : %+4.3f' % (key, metrics[key])
-                           for key in metrics]), end=' ')
+                        + ['%s : %+4.3f' % (key, lossTrain[key])
+                           for key in lossTrain]), end=' ')
       
       # Visdomによる学習曲線の表示
-      vis.line(X=np.array([state_dict['itr']]), Y=np.array([metrics['G_loss_con']]), 
+      vis.line(X=np.array([state_dict['itr']]), Y=np.array([lossTrain['G_loss_con']]), 
                win='window_1',
                update='append',
                opts=dict(title='Contextual Loss of Generator', fontsize=8, 
                          xlabel='Iteration', ylabel='Loss'))
-      vis.line(X=np.array([state_dict['itr']]), Y=np.array([metrics['G_loss_adv']]),
+      vis.line(X=np.array([state_dict['itr']]), Y=np.array([lossTrain['G_loss_adv']]),
                win='window_2',
                update='append',
                opts=dict(title='Adversarial Loss of Generator', fontsize=8, 
                          xlabel='Iteration', ylabel='Loss'))
-      vis.line(X=np.array([state_dict['itr']]), Y=np.array([metrics['D_loss_real']]),
+      vis.line(X=np.array([state_dict['itr']]), Y=np.array([lossTrain['D_loss_real']]),
                win='window_3',
                update='append',
                opts=dict(title='Real prediction Loss of Discriminator', fontsize=8, 
                          xlabel='Iteration', ylabel='Loss'))
-      vis.line(X=np.array([state_dict['itr']]), Y=np.array([metrics['D_loss_fake']]),
+      vis.line(X=np.array([state_dict['itr']]), Y=np.array([lossTrain['D_loss_fake']]),
                win='window_4',
                update='append',
                opts=dict(title='Fake prediction Loss of Discriminator', fontsize=8, 
                          xlabel='Iteration', ylabel='Loss'))
+
+
 
       # 途中経過の保存
       if (state_dict['itr'] % config['save_frequency']) == 0:
@@ -150,7 +174,7 @@ def run(config):
             Gen_decoder_ema.eval()
         utils.save_progress(Generator, Discriminator, net, Generator_ema,
                             sample_normal_loader, sample_abnormal_loader,
-                            state_dict, config)
+                            loss_log, state_dict, config)
     # Epoch + 1
     state_dict['epoch'] += 1
 

@@ -25,7 +25,7 @@ def loss_gen_con(imgs_real, imgs_fake):
   return loss
 
 def loss_gen_adv(pred_fake):
-  loss = -torch.mean(pred_fake)
+  loss = -torch.mean(F.relu(pred_fake))
   return loss
 
 def calc_gen_loss(imgs_real, imgs_fake, pred_fake):

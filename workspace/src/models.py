@@ -49,7 +49,7 @@ def Dec_arch(ch=64, attention='64', ksize='333333', dilation='111111'):
 class Decoder(nn.Module):
   def __init__(self, Dec_ch=64, latent_dim=128, initial_width=4, resolution=128,
                Dec_kernel_size=3, Dec_attn='64', n_classes=1000,
-               num_Dec_SVs=1, num_Dec_SV_itrs=1,
+               num_Dec_SVs=1, num_Dec_SV_itrs=1, Dec_ccbn_norm=False,
                Dec_shared=True, shared_dim=0, hier=False,
                mybn=False, Dec_activation=nn.ReLU(inplace=False),
                Dec_lr=5e-5, Dec_B1=0.0, Dec_B2=0.999, adam_eps=1e-8,
@@ -90,6 +90,8 @@ class Decoder(nn.Module):
     self.Dec_param = Dec_param
     # 正規化層の種類（選択肢：Batch Norm, Instance Norm, Layer Norm, Group Norm）
     self.norm_style = norm_style
+    # 潜在変数 or クラスベクトルを正規化するか指定
+    self.Dec_ccbn_norm = Dec_ccbn_norm
     # バッチ正規化層で使用するEpsilon
     self.BN_eps = BN_eps
     # スペクトラル正規化で使用するEpsilon
@@ -213,11 +215,12 @@ class Decoder(nn.Module):
   # Forwardメソッド
   def forward(self, z, y):
     # Latent variables, Class vectorの正規化
-    mins_z, mins_y = utils.tensor_min(z, 1), utils.tensor_min(y, 1)
-    maxs_z, maxs_y = utils.tensor_max(z, 1), utils.tensor_max(y, 1)
-    for i in range(z.shape[0]):
-      z[i] = (z[i] - mins_z[i]) / (maxs_z[i] - mins_z[i])
-      y[i] = (y[i] - mins_y[i]) / (maxs_y[i] - mins_y[i])
+    if self.Dec_ccbn_norm:
+      mins_z, mins_y = utils.tensor_min(z, 1), utils.tensor_min(y, 1)
+      maxs_z, maxs_y = utils.tensor_max(z, 1), utils.tensor_max(y, 1)
+      for i in range(z.shape[0]):
+        z[i] = (z[i] - mins_z[i]) / (maxs_z[i] - mins_z[i])
+        y[i] = (y[i] - mins_y[i]) / (maxs_y[i] - mins_y[i])
 
     if self.hier:
       zs = torch.split(z, self.latent_per_chunk, 1)
@@ -267,7 +270,8 @@ def Enc_arch(ch=64, attention='64', ksize='333333', dilation='111111'):
 class Encoder(nn.Module):
   def __init__(self, Enc_ch=64, Enc_wide=True, resolution=128,
                Enc_kernel_size=3, Enc_attn='64', n_classes=200,
-               num_Enc_SVs=1, num_Enc_SV_itrs=1, Enc_activation=nn.ReLU(inplace=False),
+               num_Enc_SVs=1, num_Enc_SV_itrs=1, Enc_ccbn_norm=False,
+               Enc_activation=nn.ReLU(inplace=False),
                Enc_lr=2e-4, Enc_B1=0.0, Enc_B2=0.999, adam_eps=1e-8,
                SN_eps=1e-12, output_dim=1, Enc_init='ortho', skip_init=False, 
                no_optim=False, Enc_param='SN', out_latent=False,
@@ -294,6 +298,8 @@ class Encoder(nn.Module):
     self.init = Enc_init
     # 重みの正規化手法 ⇒ Spectral Normalizationなどの指定
     self.Enc_param = Enc_param
+    # クラスベクトルの正規化をするか指定
+    self.Enc_ccbn_norm = Enc_ccbn_norm
     # スペクトラル正規化で使用するEpsilon
     self.SN_eps = SN_eps
     # 初期学習率
@@ -393,9 +399,12 @@ class Encoder(nn.Module):
     out = self.linear_layer(h)
     # Get projection of final featureset onto class vectors and add to evidence
     class_vector = self.embed_layer(y)
-    mins_class, maxs_class = utils.tensor_min(class_vector, 1), utils.tensor_max(class_vector, 1)
-    for i in range(class_vector.shape[0]):
-      class_vector[i] = (class_vector[i] - mins_class[i]) / (maxs_class[i] - mins_class[i])
+    
+    # クラスベクトルの正規化
+    if self.Enc_ccbn_norm:
+      mins_class, maxs_class = utils.tensor_min(class_vector, 1), utils.tensor_max(class_vector, 1)
+      for i in range(class_vector.shape[0]):
+        class_vector[i] = (class_vector[i] - mins_class[i]) / (maxs_class[i] - mins_class[i])
 
     if self.out_latent:
       out = out + self.linear_layer(class_vector * h)

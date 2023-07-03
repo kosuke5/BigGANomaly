@@ -38,7 +38,7 @@ def dicomLoader(path):
 def makeClassDict(root_dir):
   first_patientID = os.listdir(root_dir)[0]
   path = os.path.join(root_dir, first_patientID)
-  classes = [section for section in os.listdir(path) if os.path.isdir(os.path.join(path, section))]
+  classes = [label for label in os.listdir(path) if os.path.isdir(os.path.join(path, label))]
   classes.sort()
   class_dict = {classes[i]: i for i in range(len(classes))}
   return classes, class_dict

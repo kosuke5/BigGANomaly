@@ -16,6 +16,7 @@ import datetime
 from argparse import ArgumentParser
 import json
 from typing import Sequence, Union
+from matplotlib import pyplot as plt
 
 # Pytorch関連モジュールのインポート
 import torch
@@ -95,6 +96,12 @@ def prepareParser():
   parser.add_argument(
     '--D_attn', type=str, default='64',
     help='DiscriminatorでSelf Attentionを導入する解像度の指定')
+  parser.add_argument(
+    '--G_ccbn_norm', action='store_true', default=False,
+    help='GeneratorのCCBNで潜在変数・クラスベクトルを正規化するかの指定')
+  parser.add_argument(
+    '--D_ccbn_norm', action='store_true', default=False,
+    help='GeneratorのCCBNで潜在変数・クラスベクトルを正規化するかの指定')
   parser.add_argument(
     '--norm_style', type=str, default='bn',
     help='正規化層の種類の指定（bn [batchnorm], in [instancenorm], ln [layernorm], gn [groupnorm]')
@@ -193,6 +200,12 @@ def prepareParser():
   parser.add_argument(
     '--option_folder', type=str, default='option',
     help='実験オプションの保存場所のルート指定')
+  parser.add_argument(
+    '--trainCurve_folder', type=str, default='trainCurve',
+    help='学習曲線の保存場所のルート指定')
+  parser.add_argument(
+    '--structure_folder', type=str, default='structure',
+    help='ネットワーク構成の保存場所のルート指定')
 
   #### EMA（指数平滑移動平均）に関する引数 ###
   parser.add_argument(
@@ -278,9 +291,12 @@ activation_dict = {'inplace_relu': nn.ReLU(inplace=True),
 # =====================================================================
 # 初期化
 def initialize_all(config):
-  
-  # 実験オプションの保存
   config['save_date'] = str(datetime.datetime.today().date())
+  
+  # 各データの保存先作成
+  prepare_folder(config)
+
+  # 実験オプションの保存
   save_option(config)
 
   # Configのアップデート
@@ -292,8 +308,6 @@ def initialize_all(config):
 
   # 乱数シードの初期化
   seed_rng(config['seed'])
-  # 各データの保存先作成
-  prepare_folder(config)
   # GPU使用率の上限解放 ⇒ GPuを使用した処理の高速化
   torch.backends.cudnn.benchmark = True
   # Cudaデバイスの指定
@@ -312,7 +326,7 @@ def seed_rng(seed):
 
 # 結果の保存先フォルダを作成
 def prepare_folder(config):
-  for key in ['weights_folder', 'images_folder', 'option_folder']:
+  for key in ['weights_folder', 'images_folder', 'option_folder', 'trainCurve_folder', 'structure_folder']:
     dir_path = os.path.join(config['save_root'], config['save_date'], config[key])
     if not os.path.exists(dir_path):
       os.makedirs(dir_path)
@@ -381,14 +395,76 @@ def tensor_min(x: Tensor, axis: Union[int, Sequence[int], None]=None, keepdims: 
   
   return x
 
+# Generatorネットワークの詳細を保存
+def save_gen_detail(config, net):
+  from torchinfo import summary
+  from torchvision.models.feature_extraction import get_graph_node_names
+  
+  # Layerの名前を取得
+  enc_node_names = get_graph_node_names(net.Enc)
+  dec_node_names = get_graph_node_names(net.Dec)
+  
+  # ネットワークの構成を取得
+  model_stats = summary(net, [(1, 1, imsize_dict[config['dataset']], imsize_dict[config['dataset']]), (1,)], device='cpu', dtypes=[torch.float, torch.long], depth=5)
+  
+  # Textファイルとして保存
+  root = os.path.join(config['save_root'], config['save_date'], config['structure_folder'])
+  with open(os.path.join(root, 'layerName_Genc.txt'), 'w') as f:
+    f.write(str(enc_node_names))
+  with open(os.path.join(root, 'layerName_Gdec.txt'), 'w') as f:
+    f.write(str(dec_node_names))
+  with open(os.path.join(root, 'Generator.txt'), 'w') as f:
+    f.write(str(model_stats))
+
+
+
+# DataLoaderに渡すSamplerクラス
+# =====================================================================
+# multi-epoch Dataset sampler to avoid memory leakage and enable resumption of
+# training from the same sample regardless of if we stop mid-epoch
+class MultiEpochSampler(torch.utils.data.Sampler):
+  """Samples elements randomly over multiple epochs
+
+  Arguments:
+      data_source (Dataset): dataset to sample from
+      num_epochs (int) : Number of times to loop over the dataset
+      start_itr (int) : which iteration to begin from
+  """
+
+  def __init__(self, data_source, num_epochs, start_itr=0, batch_size=128):
+    self.data_source = data_source
+    self.num_samples = len(self.data_source)
+    self.num_epochs = num_epochs
+    self.start_itr = start_itr
+    self.batch_size = batch_size
+
+    if not isinstance(self.num_samples, int) or self.num_samples <= 0:
+      raise ValueError("num_samples should be a positive integeral "
+                       "value, but got num_samples={}".format(self.num_samples))
+
+  def __iter__(self):
+    n = len(self.data_source)
+    # Determine number of epochs
+    num_epochs = int(np.ceil((n * self.num_epochs 
+                              - (self.start_itr * self.batch_size)) / float(n)))
+    
+    out = [torch.randperm(n) for epoch in range(self.num_epochs)][-num_epochs:]
+    # Ignore the first start_itr % n indices of the first epoch
+    out[0] = out[0][(self.start_itr * self.batch_size % n):]
+    output = torch.cat(out).tolist()
+    return iter(output)
+
+  def __len__(self):
+    return len(self.data_source) * self.num_epochs - self.start_itr * self.batch_size
+
 
 
 # DataLoaderの作成関数
 # =====================================================================
 def getDataLoader(dataset, data_root=None, data_resize=False, batch_size=64,
-                  num_workers=8, shuffle=True, pin_memory=True, drop_last=True, 
-                  use_multiepoch_sampler=False, sample=False, sample_type='normal',
-                  **kwargs):
+                  num_workers=8, shuffle=True, pin_memory=True, drop_last=True,
+                  num_epochs=500, start_itr=0, use_multiepoch_sampler=False,
+                  sample=False, sample_type='normal', **kwargs):
   
   # データパスの作成
   if sample:
@@ -418,13 +494,19 @@ def getDataLoader(dataset, data_root=None, data_resize=False, batch_size=64,
   train_dataset = dataset_fn(root=data_root, transform=train_transforms, **kwargs)
 
   # Dataloaderの作成
-  # TODO: Samplerでバッチの取得方法を変更する必要があるかも・・・（use_multiepoch_samplerの使用方法）
-  loader_kwargs = {'num_workers': num_workers, 'pin_memory': pin_memory,
-                   'drop_last': drop_last}
-  train_dataloader = DataLoader(train_dataset, batch_size=batch_size,
-                                shuffle=shuffle, **loader_kwargs)
+  if use_multiepoch_sampler:
+    loader_kwargs = {'num_workers': num_workers, 'pin_memory': pin_memory}
+    sampler = MultiEpochSampler(train_dataset, num_epochs, start_itr, batch_size)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size,
+                                  sampler=sampler, **loader_kwargs)
+  else:
+    loader_kwargs = {'num_workers': num_workers, 'pin_memory': pin_memory,
+                    'drop_last': drop_last}
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size,
+                                  shuffle=shuffle, **loader_kwargs)
 
   return train_dataloader
+
 
 
 # 学習状況の詳細を表示する関数
@@ -467,12 +549,13 @@ def progress(items, desc='', total=None, min_delay=0.1, displaytype='s1k'):
                                                    divmod(t_total, 60)))
   
 
+
 # 学習過程を記録する関数
 # 説明：各ネットワークの重み、生成画像を随時保存
 # =====================================================================
-def save_progress(G, D, GD, G_ema, normal_loader, abnormal_loader, state_dict, config):
+def save_progress(G, D, GD, G_ema, normal_loader, abnormal_loader, loss_log, state_dict, config):
   # 重みの保存
-  save_weights(G, D, G_ema, state_dict, config)
+  # save_weights(G, D, G_ema, state_dict, config)
 
   # 画像の保存
   if config['ema'] and config['use_ema']:
@@ -482,6 +565,10 @@ def save_progress(G, D, GD, G_ema, normal_loader, abnormal_loader, state_dict, c
 
   save_imgs(which_G, normal_loader, state_dict, config, 'normal')
   save_imgs(which_G, abnormal_loader, state_dict, config, 'abnormal')
+
+  # 学習曲線の保存
+  save_trainCurve(loss_log, state_dict, config)
+
 
 # 重みの保存
 # -------------------------------------------------------------
@@ -497,6 +584,7 @@ def save_weights(G, D, G_ema, state_dict, config):
   torch.save(G_ema.Enc.state_dict(), '%s/%s.pth' % (path, 'G_ema_enc'))
   torch.save(G_ema.Dec.state_dict(), '%s/%s.pth' % (path, 'G_ema_dec'))
   torch.save(D.Enc.state_dict(), '%s/%s.pth' % (path, 'D_enc'))
+
 
 # 画像の保存
 # -------------------------------------------------------------
@@ -541,6 +629,58 @@ def save_imgs(G, loader, state_dict, config, type):
     last_patient = cur_patient
     idx += 1
 
+
+# 学習曲線の保存
+# -------------------------------------------------------------
+def save_trainCurve(loss_log, state_dict, config):
+   # 保存ファルダの作成
+  path_folder = os.path.join(config['save_root'], config['save_date'],
+                      config['trainCurve_folder'], 'iter_%d' % (state_dict['itr']))
+  if not os.path.exists(path_folder):
+    os.makedirs(path_folder)
+
+  t = [i for i in range(state_dict['itr'])]
+
+  # Figure作成
+  fig = plt.figure(figsize=(10, 7))
+  fig.subplots_adjust(wspace=0.4, hspace=0.6)
+
+  # Contextual Loss of Generator
+  ax1 = fig.add_subplot(2, 2, 1)
+  ax1.plot(t, loss_log['G_log_con'])
+  ax1.set_title('Contextual Loss of Generator')
+  ax1.set_xlabel('Iteration')
+  ax1.set_ylabel('Loss')
+  ax1.grid()
+  
+  # Adversarial Loss of Generator
+  ax2 = fig.add_subplot(2, 2, 2)
+  ax2.plot(t, loss_log['G_log_adv'])
+  ax2.set_title('Adversarial Loss of Generator')
+  ax2.set_xlabel('Iteration')
+  ax2.set_ylabel('Loss')
+  ax2.grid()
+
+  # Real Prediction Loss of Discriminator
+  ax3 = fig.add_subplot(2, 2, 3)
+  ax3.plot(t, loss_log['D_log_real'])
+  ax3.set_title('Real Prediction Loss of Discriminator')
+  ax3.set_xlabel('Iteration')
+  ax3.set_ylabel('Loss')
+  ax3.grid()
+  
+  # Fake Prediction Loss of Discriminator
+  ax4 = fig.add_subplot(2, 2, 4)
+  ax4.plot(t, loss_log['D_log_fake'])
+  ax4.set_title('Fake Prediction Loss of Discriminator')
+  ax4.set_xlabel('Iteration')
+  ax4.set_ylabel('Loss')
+  ax4.grid()
+
+  fig.savefig(os.path.join(path_folder, 'trainCurve.png'))
+
+
+
 # 実験オプションの保存
 # -------------------------------------------------------------
 def save_option(config):
@@ -549,6 +689,7 @@ def save_option(config):
 
   with open(filename, 'w', encoding='utf-8', newline='\n') as fp:
     json.dump(config, fp, indent=2)
+
 
 
 # EMA学習を行うクラス -> Generatorクラスのラッパー
